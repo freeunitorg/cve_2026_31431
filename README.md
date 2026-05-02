@@ -39,9 +39,10 @@ predates that range.
 | File | Purpose |
 | --- | --- |
 | `test_cve_2026_31431.py` | Non-destructive detector. Operates on a sentinel file in a temp dir; never touches system binaries. |
+| `test_cve_2026_31431.3.6.py` | Non-destructive detector. Operates on a sentinel file in a temp dir; never touches system binaries. |
 | `exploit_cve_2026_31431.py` | LPE. Flips the running user's UID to 0 in `/etc/passwd`'s page cache, then invokes `su` for a root shell. |
 
-Both scripts are pure Python 3.10+ stdlib.
+Both scripts are pure Python 3.10+ stdlib. 3.6.py - for old python 3.6
 
 ## Quick start
 
